@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import fs from 'fs';
+import path from 'path';
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import SelectInput from 'ink-select-input';
 import TextInput from 'ink-text-input';
@@ -8,6 +9,7 @@ import { buildLinkPlan } from '../core/plan.js';
 import { applyLinkPlan } from '../core/apply.js';
 import { getLinkStatus } from '../core/status.js';
 import { applyMigration, scanMigration } from '../core/migrate.js';
+import { resolveRoots } from '../core/paths.js';
 import type { Scope, LinkPlan, LinkStatus } from '../core/types.js';
 import type { MigrationPlan, MigrationCandidate } from '../core/migrate.js';
 import { installSkillsFromSource } from '../installers/skills.js';
@@ -23,6 +25,7 @@ type Step =
   | 'action'
   | 'status'
   | 'applying'
+  | 'force-confirm'
   | 'migrate-choice'
   | 'skill-source-type'
   | 'skill-input'
@@ -47,6 +50,7 @@ export const App: React.FC = () => {
   const [skillInput, setSkillInput] = useState<string>('');
   const [marketplaceInput, setMarketplaceInput] = useState<string>('');
   const [marketplacePlugins, setMarketplacePlugins] = useState<string[]>([]);
+  const [forceBackupDir, setForceBackupDir] = useState<string | null>(null);
   const [showDetails, setShowDetails] = useState<boolean>(false);
   const [conflictsOnly, setConflictsOnly] = useState<boolean>(false);
   const { stdout } = useStdout();
@@ -59,6 +63,7 @@ export const App: React.FC = () => {
     if (key.escape) {
       if (step === 'action') return setStep('scope');
       if (step === 'status') return setStep('action');
+      if (step === 'force-confirm') return setStep('action');
       if (step === 'migrate-choice') {
         setMigratePlan(null);
         setMigrateSelections(new Map());
@@ -93,7 +98,7 @@ export const App: React.FC = () => {
     const items = [
       { label: 'Apply/repair links', value: 'apply' },
     ] as { label: string; value: string }[];
-    if (conflicts > 0) items.push({ label: 'Force apply (overwrite conflicts)', value: 'force-apply' });
+    if (conflicts > 0) items.push({ label: 'Force apply (backup + overwrite conflicts)', value: 'force-apply' });
     items.push({ label: 'View status', value: 'view-status' });
     items.push({ label: 'Migrate existing content', value: 'migrate' });
     items.push({ label: 'Add skill', value: 'add-skill' });
@@ -277,12 +282,31 @@ export const App: React.FC = () => {
                 return;
               }
               if (item.value === 'apply' || item.value === 'force-apply') {
-                setBusy(item.value === 'force-apply' ? 'Applying (force)...' : 'Applying...');
+                if (item.value === 'force-apply') {
+                  setBusy('Preparing force apply...');
+                  setStep('applying');
+                  void (async () => {
+                    try {
+                      if (!scope) return;
+                      const roots = resolveRoots({ scope });
+                      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                      setForceBackupDir(path.join(roots.canonicalRoot, 'backup', timestamp));
+                      setStep('force-confirm');
+                    } catch (err: any) {
+                      setMessage(err?.message || String(err));
+                      setStep('done');
+                    } finally {
+                      setBusy(null);
+                    }
+                  })();
+                  return;
+                }
+                setBusy('Applying...');
                 setStep('applying');
                 void (async () => {
                   try {
                     if (!plan || !scope) return;
-                    const result = await applyLinkPlan(plan, { force: item.value === 'force-apply' });
+                    const result = await applyLinkPlan(plan);
                     setMessage(`Applied: ${result.applied}, Skipped: ${result.skipped}, Conflicts: ${result.conflicts}`);
                     await refreshStatus(scope);
                   } catch (err: any) {
@@ -329,6 +353,54 @@ export const App: React.FC = () => {
           {renderStatusList()}
         </ScrollArea>
         <HelpBar text="d: details · c: conflicts only · a: show all · Esc: back · q: quit" />
+      </Screen>
+    );
+  }
+
+  if (step === 'force-confirm') {
+    return (
+      <Screen>
+        <Text color="yellow">Force apply will overwrite existing real files/directories.</Text>
+        <Box flexDirection="column" marginTop={1}>
+          <Text>Backup will be created at:</Text>
+          <Text dimColor>{forceBackupDir || '(pending)'}</Text>
+        </Box>
+        <Box marginTop={1} flexDirection="column">
+          <SelectInput
+            items={[
+              { label: 'Proceed (create backup + overwrite)', value: 'proceed' },
+              { label: 'Cancel', value: 'cancel' },
+            ]}
+            onSelect={(item) => {
+              if (item.value === 'cancel') {
+                setForceBackupDir(null);
+                setStep('action');
+                return;
+              }
+              setBusy('Applying (force)...');
+              setStep('applying');
+              void (async () => {
+                try {
+                  if (!plan || !scope) return;
+                  const backupDir = forceBackupDir || undefined;
+                  const result = await applyLinkPlan(plan, { force: true, backupDir });
+                  const backupNote = result.backedUp > 0 && result.backupDir
+                    ? `, Backed up: ${result.backedUp} (${result.backupDir})`
+                    : '';
+                  setMessage(`Applied: ${result.applied}, Skipped: ${result.skipped}, Conflicts: ${result.conflicts}${backupNote}`);
+                  await refreshStatus(scope);
+                } catch (err: any) {
+                  setMessage(err?.message || String(err));
+                } finally {
+                  setForceBackupDir(null);
+                  setBusy(null);
+                  setStep('done');
+                }
+              })();
+            }}
+          />
+          <HelpBar text="Enter to confirm · Esc to cancel · q to quit" />
+        </Box>
       </Screen>
     );
   }
