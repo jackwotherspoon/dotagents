@@ -44,6 +44,7 @@ export function getMappings(opts: MappingOptions): Mapping[] {
       targets: [
         path.join(roots.claudeRoot, 'skills'),
         path.join(roots.factoryRoot, 'skills'),
+        path.join(roots.codexRoot, 'skills'),
       ],
       kind: 'dir',
     },

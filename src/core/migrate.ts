@@ -94,6 +94,7 @@ export async function scanMigration(opts: RootOptions): Promise<MigrationPlan> {
     skills: [
       { label: 'Claude skills', dir: path.join(roots.claudeRoot, 'skills') },
       { label: 'Factory skills', dir: path.join(roots.factoryRoot, 'skills') },
+      { label: 'Codex skills', dir: path.join(roots.codexRoot, 'skills') },
     ],
     agents: [
       { label: 'Claude CLAUDE.md', file: path.join(roots.claudeRoot, 'CLAUDE.md') },
@@ -183,6 +184,7 @@ export async function scanMigration(opts: RootOptions): Promise<MigrationPlan> {
     { label: 'factory/hooks', path: path.join(roots.factoryRoot, 'hooks'), kind: 'dir' },
     { label: 'claude/skills', path: path.join(roots.claudeRoot, 'skills'), kind: 'dir' },
     { label: 'factory/skills', path: path.join(roots.factoryRoot, 'skills'), kind: 'dir' },
+    { label: 'codex/skills', path: path.join(roots.codexRoot, 'skills'), kind: 'dir' },
     { label: 'claude/CLAUDE.md', path: path.join(roots.claudeRoot, 'CLAUDE.md'), kind: 'file' },
   ];
 

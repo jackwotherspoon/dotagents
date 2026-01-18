@@ -52,6 +52,8 @@ Global home affects all projects. Project folder only affects the current direct
 
 `.agents/skills` → `~/.factory/skills`
 
+`.agents/skills` → `~/.codex/skills`
+
 ## Development
 
 Run the TUI in dev mode:
