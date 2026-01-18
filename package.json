@@ -14,7 +14,7 @@
   ],
   "scripts": {
     "dev": "bun run src/cli.tsx",
-    "build": "bun build src/cli.tsx --outdir dist --target node --format esm --external react --external ink --external ink-select-input --external ink-text-input --external ink-spinner",
+    "build": "bun build src/cli.tsx --outdir dist --target node --format esm --external react --external ink --external ink-select-input --external ink-spinner",
     "type-check": "tsc --noEmit",
     "test": "bun test"
   },
@@ -22,7 +22,6 @@
     "gray-matter": "^4.0.3",
     "ink": "^5.0.1",
     "ink-select-input": "^6.1.0",
-    "ink-text-input": "^5.0.1",
     "ink-spinner": "^5.0.0",
     "react": "^18.3.1"
   },

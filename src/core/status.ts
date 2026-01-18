@@ -16,7 +16,7 @@ async function resolveLinkTarget(targetPath: string): Promise<string | null> {
 }
 
 export async function getLinkStatus(opts: MappingOptions): Promise<LinkStatus[]> {
-  const mappings = getMappings(opts);
+  const mappings = await getMappings(opts);
   const statuses: LinkStatus[] = [];
 
   for (const mapping of mappings) {

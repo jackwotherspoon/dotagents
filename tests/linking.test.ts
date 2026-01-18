@@ -3,6 +3,7 @@ import path from 'path';
 import { test, expect } from 'bun:test';
 import { buildLinkPlan } from '../src/core/plan.js';
 import { applyLinkPlan } from '../src/core/apply.js';
+import { createBackupSession, finalizeBackup } from '../src/core/backup.js';
 import { makeTempDir, writeFile } from './helpers.js';
 
 async function readLinkTarget(target: string): Promise<string> {
@@ -14,7 +15,9 @@ test('creates symlinks from canonical .agents to tool homes', async () => {
   const home = await makeTempDir('dotagents-home-');
 
   const plan = await buildLinkPlan({ scope: 'global', homeDir: home });
-  const result = await applyLinkPlan(plan);
+  const backup = await createBackupSession({ canonicalRoot: path.join(home, '.agents'), scope: 'global', operation: 'test' });
+  const result = await applyLinkPlan(plan, { backup });
+  await finalizeBackup(backup);
   expect(result.applied).toBeGreaterThan(0);
 
   const canonical = path.join(home, '.agents');
@@ -27,20 +30,80 @@ test('creates symlinks from canonical .agents to tool homes', async () => {
   const factoryCommands = path.join(home, '.factory', 'commands');
   const codexPrompts = path.join(home, '.codex', 'prompts');
   const claudeAgents = path.join(home, '.claude', 'CLAUDE.md');
+  const factoryAgents = path.join(home, '.factory', 'AGENTS.md');
+  const codexAgents = path.join(home, '.codex', 'AGENTS.md');
 
   expect(await readLinkTarget(claudeCommands)).toBe(commands);
   expect(await readLinkTarget(factoryCommands)).toBe(commands);
   expect(await readLinkTarget(codexPrompts)).toBe(commands);
   expect(await readLinkTarget(claudeAgents)).toBe(agentsFile);
+  expect(await readLinkTarget(factoryAgents)).toBe(agentsFile);
+  expect(await readLinkTarget(codexAgents)).toBe(agentsFile);
+});
+
+test('adds cursor links when .cursor exists without .claude', async () => {
+  const home = await makeTempDir('dotagents-home-');
+  const cursorRoot = path.join(home, '.cursor');
+  await fs.promises.mkdir(cursorRoot, { recursive: true });
+
+  const plan = await buildLinkPlan({ scope: 'global', homeDir: home });
+  const backup = await createBackupSession({ canonicalRoot: path.join(home, '.agents'), scope: 'global', operation: 'test' });
+  const result = await applyLinkPlan(plan, { backup });
+  await finalizeBackup(backup);
+  expect(result.applied).toBeGreaterThan(0);
+
+  const commands = path.join(home, '.agents', 'commands');
+  const skills = path.join(home, '.agents', 'skills');
+  const cursorCommands = path.join(cursorRoot, 'commands');
+  const cursorSkills = path.join(cursorRoot, 'skills');
+
+  expect(await readLinkTarget(cursorCommands)).toBe(commands);
+  expect(await readLinkTarget(cursorSkills)).toBe(skills);
+});
+
+test('relinks Claude prompt when CLAUDE.md is added', async () => {
+  const home = await makeTempDir('dotagents-home-');
+
+  const first = await buildLinkPlan({ scope: 'global', homeDir: home });
+  const backupFirst = await createBackupSession({ canonicalRoot: path.join(home, '.agents'), scope: 'global', operation: 'test' });
+  await applyLinkPlan(first, { backup: backupFirst });
+  await finalizeBackup(backupFirst);
+
+  const canonical = path.join(home, '.agents');
+  const agentsFile = path.join(canonical, 'AGENTS.md');
+  const claudeFile = path.join(canonical, 'CLAUDE.md');
+  const claudeAgents = path.join(home, '.claude', 'CLAUDE.md');
+  const factoryAgents = path.join(home, '.factory', 'AGENTS.md');
+  const codexAgents = path.join(home, '.codex', 'AGENTS.md');
+
+  expect(await readLinkTarget(claudeAgents)).toBe(agentsFile);
+  expect(await readLinkTarget(factoryAgents)).toBe(agentsFile);
+  expect(await readLinkTarget(codexAgents)).toBe(agentsFile);
+
+  await writeFile(claudeFile, '# Claude override');
+
+  const second = await buildLinkPlan({ scope: 'global', homeDir: home });
+  const backupSecond = await createBackupSession({ canonicalRoot: path.join(home, '.agents'), scope: 'global', operation: 'test' });
+  const result = await applyLinkPlan(second, { backup: backupSecond });
+  await finalizeBackup(backupSecond);
+  expect(result.applied).toBeGreaterThan(0);
+
+  expect(await readLinkTarget(claudeAgents)).toBe(claudeFile);
+  expect(await readLinkTarget(factoryAgents)).toBe(agentsFile);
+  expect(await readLinkTarget(codexAgents)).toBe(agentsFile);
 });
 
 test('idempotent apply produces no changes on second run', async () => {
   const home = await makeTempDir('dotagents-home-');
   const first = await buildLinkPlan({ scope: 'global', homeDir: home });
-  await applyLinkPlan(first);
+  const backupFirst = await createBackupSession({ canonicalRoot: path.join(home, '.agents'), scope: 'global', operation: 'test' });
+  await applyLinkPlan(first, { backup: backupFirst });
+  await finalizeBackup(backupFirst);
 
   const second = await buildLinkPlan({ scope: 'global', homeDir: home });
-  const result = await applyLinkPlan(second);
+  const backupSecond = await createBackupSession({ canonicalRoot: path.join(home, '.agents'), scope: 'global', operation: 'test' });
+  const result = await applyLinkPlan(second, { backup: backupSecond });
+  await finalizeBackup(backupSecond);
   expect(result.applied).toBe(0);
 });
 
@@ -53,7 +116,9 @@ test('force apply replaces conflicting targets', async () => {
   const plan = await buildLinkPlan({ scope: 'global', homeDir: home });
   expect(plan.conflicts.length).toBeGreaterThan(0);
 
-  const result = await applyLinkPlan(plan, { force: true });
+  const backup = await createBackupSession({ canonicalRoot: path.join(home, '.agents'), scope: 'global', operation: 'test' });
+  const result = await applyLinkPlan(plan, { force: true, backup });
+  await finalizeBackup(backup);
   expect(result.applied).toBeGreaterThan(0);
 
   const target = await readLinkTarget(codexPrompts);

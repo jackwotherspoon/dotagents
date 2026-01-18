@@ -30,7 +30,12 @@ async function ensureSourceTask(source: string, kind: SourceKind): Promise<LinkT
   return [];
 }
 
-async function analyzeTarget(source: string, target: string, kind: SourceKind): Promise<LinkTask> {
+async function analyzeTarget(
+  source: string,
+  target: string,
+  kind: SourceKind,
+  opts?: { relinkableSources?: string[] },
+): Promise<LinkTask> {
   const exists = await pathExists(target);
   if (!exists) return { type: 'link', source, target, kind };
   const stat = await fs.promises.lstat(target);
@@ -38,6 +43,12 @@ async function analyzeTarget(source: string, target: string, kind: SourceKind): 
     const resolved = await getLinkTargetAbsolute(target);
     if (resolved && path.resolve(resolved) === path.resolve(source)) {
       return { type: 'noop', source, target };
+    }
+    if (resolved && opts?.relinkableSources) {
+      const relinkable = new Set(opts.relinkableSources.map((p) => path.resolve(p)));
+      if (relinkable.has(path.resolve(resolved))) {
+        return { type: 'link', source, target, kind, replaceSymlink: true };
+      }
     }
     const detail = resolved ? `Symlink points elsewhere: ${resolved}` : 'Symlink points elsewhere';
     return { type: 'conflict', source, target, reason: detail, kind };
@@ -47,13 +58,19 @@ async function analyzeTarget(source: string, target: string, kind: SourceKind): 
 }
 
 export async function buildLinkPlan(opts: MappingOptions): Promise<LinkPlan> {
-  const mappings = getMappings(opts);
+  const mappings = await getMappings(opts);
   const tasks: LinkTask[] = [];
 
   for (const mapping of mappings) {
     tasks.push(...await ensureSourceTask(mapping.source, mapping.kind));
+    const relinkableSources = mapping.name === 'claude-md'
+      ? [
+        path.join(path.dirname(mapping.source), 'AGENTS.md'),
+        path.join(path.dirname(mapping.source), 'CLAUDE.md'),
+      ]
+      : undefined;
     for (const target of mapping.targets) {
-      tasks.push(await analyzeTarget(mapping.source, target, mapping.kind));
+      tasks.push(await analyzeTarget(mapping.source, target, mapping.kind, { relinkableSources }));
     }
   }
 

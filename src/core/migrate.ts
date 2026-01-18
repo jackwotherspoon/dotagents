@@ -5,7 +5,9 @@ import type { RootOptions } from './paths.js';
 import { findSkillDirs, parseSkillFile } from './skills.js';
 import { buildLinkPlan } from './plan.js';
 import { applyLinkPlan } from './apply.js';
-import { copyDir, copyFile, ensureDir, pathExists, removePath } from '../utils/fs.js';
+import { copyDir, copyFile, pathExists } from '../utils/fs.js';
+import type { BackupSession } from './backup.js';
+import { backupPath, recordCreatedPath } from './backup.js';
 
 export type MigrationCandidate = {
   label: string;
@@ -24,7 +26,6 @@ export type MigrationConflict = {
 export type MigrationPlan = {
   auto: MigrationCandidate[];
   conflicts: MigrationConflict[];
-  backupPaths: { label: string; path: string; kind: 'file' | 'dir' }[];
   canonicalRoot: string;
 };
 
@@ -46,23 +47,6 @@ async function listFiles(dir: string): Promise<string[]> {
   }
 }
 
-async function movePath(src: string, dest: string, kind: 'file' | 'dir'): Promise<void> {
-  await ensureDir(path.dirname(dest));
-  try {
-    await fs.promises.rename(src, dest);
-    return;
-  } catch (err: any) {
-    if (err?.code !== 'EXDEV') throw err;
-  }
-
-  if (kind === 'file') {
-    await copyFile(src, dest, true);
-  } else {
-    await copyDir(src, dest, true);
-  }
-  await removePath(src);
-}
-
 function conflictLabel(targetPath: string, canonicalRoot: string): string {
   if (targetPath.startsWith(canonicalRoot)) {
     const rel = path.relative(canonicalRoot, targetPath);
@@ -80,12 +64,14 @@ export async function scanMigration(opts: RootOptions): Promise<MigrationPlan> {
   const canonicalHooks = path.join(canonicalRoot, 'hooks');
   const canonicalSkills = path.join(canonicalRoot, 'skills');
   const canonicalAgents = path.join(canonicalRoot, 'AGENTS.md');
+  const canonicalClaude = path.join(canonicalRoot, 'CLAUDE.md');
 
   const sources = {
     commands: [
       { label: 'Claude commands', dir: path.join(roots.claudeRoot, 'commands') },
       { label: 'Factory commands', dir: path.join(roots.factoryRoot, 'commands') },
       { label: 'Codex prompts', dir: path.join(roots.codexRoot, 'prompts') },
+      { label: 'Cursor commands', dir: path.join(roots.cursorRoot, 'commands') },
     ],
     hooks: [
       { label: 'Claude hooks', dir: path.join(roots.claudeRoot, 'hooks') },
@@ -95,8 +81,14 @@ export async function scanMigration(opts: RootOptions): Promise<MigrationPlan> {
       { label: 'Claude skills', dir: path.join(roots.claudeRoot, 'skills') },
       { label: 'Factory skills', dir: path.join(roots.factoryRoot, 'skills') },
       { label: 'Codex skills', dir: path.join(roots.codexRoot, 'skills') },
+      { label: 'Cursor skills', dir: path.join(roots.cursorRoot, 'skills') },
     ],
     agents: [
+      { label: 'Claude AGENTS.md', file: path.join(roots.claudeRoot, 'AGENTS.md') },
+      { label: 'Factory AGENTS.md', file: path.join(roots.factoryRoot, 'AGENTS.md') },
+      { label: 'Codex AGENTS.md', file: path.join(roots.codexRoot, 'AGENTS.md') },
+    ],
+    claude: [
       { label: 'Claude CLAUDE.md', file: path.join(roots.claudeRoot, 'CLAUDE.md') },
     ],
   } as const;
@@ -144,6 +136,11 @@ export async function scanMigration(opts: RootOptions): Promise<MigrationPlan> {
     addCandidate({ label: src.label, targetPath: canonicalAgents, kind: 'file', action: 'copy', sourcePath: src.file });
   }
 
+  for (const src of sources.claude) {
+    if (!await pathExists(src.file) || await isSymlink(src.file)) continue;
+    addCandidate({ label: src.label, targetPath: canonicalClaude, kind: 'file', action: 'copy', sourcePath: src.file });
+  }
+
   const auto: MigrationCandidate[] = [];
   const conflicts: MigrationConflict[] = [];
 
@@ -176,31 +173,27 @@ export async function scanMigration(opts: RootOptions): Promise<MigrationPlan> {
     });
   }
 
-  const backupPaths: MigrationPlan['backupPaths'] = [
-    { label: 'claude/commands', path: path.join(roots.claudeRoot, 'commands'), kind: 'dir' },
-    { label: 'factory/commands', path: path.join(roots.factoryRoot, 'commands'), kind: 'dir' },
-    { label: 'codex/prompts', path: path.join(roots.codexRoot, 'prompts'), kind: 'dir' },
-    { label: 'claude/hooks', path: path.join(roots.claudeRoot, 'hooks'), kind: 'dir' },
-    { label: 'factory/hooks', path: path.join(roots.factoryRoot, 'hooks'), kind: 'dir' },
-    { label: 'claude/skills', path: path.join(roots.claudeRoot, 'skills'), kind: 'dir' },
-    { label: 'factory/skills', path: path.join(roots.factoryRoot, 'skills'), kind: 'dir' },
-    { label: 'codex/skills', path: path.join(roots.codexRoot, 'skills'), kind: 'dir' },
-    { label: 'claude/CLAUDE.md', path: path.join(roots.claudeRoot, 'CLAUDE.md'), kind: 'file' },
-  ];
-
-  return { auto, conflicts, backupPaths, canonicalRoot };
+  return { auto, conflicts, canonicalRoot };
 }
 
-export async function applyMigration(plan: MigrationPlan, selections: Map<string, MigrationCandidate | null>, opts: RootOptions): Promise<{ copied: number; skipped: number; backupDir: string }> {
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const backupDir = path.join(plan.canonicalRoot, 'backup', timestamp);
-  await ensureDir(backupDir);
-
+export async function applyMigration(
+  plan: MigrationPlan,
+  selections: Map<string, MigrationCandidate | null>,
+  opts: RootOptions & { backup?: BackupSession; forceLinks?: boolean },
+): Promise<{ copied: number; skipped: number; backupDir: string }> {
+  const backup = opts.backup;
+  if (!backup) throw new Error('Backup session required.');
   let copied = 0;
   let skipped = 0;
 
   const copyCandidate = async (candidate: MigrationCandidate) => {
     if (candidate.action !== 'copy' || !candidate.sourcePath) return false;
+    const existed = await pathExists(candidate.targetPath);
+    if (existed) {
+      await backupPath(candidate.targetPath, backup);
+    } else {
+      recordCreatedPath(candidate.targetPath, candidate.kind === 'dir' ? 'dir' : 'file', backup);
+    }
     if (candidate.kind === 'file') {
       await copyFile(candidate.sourcePath, candidate.targetPath, true);
     } else {
@@ -219,16 +212,8 @@ export async function applyMigration(plan: MigrationPlan, selections: Map<string
     if (await copyCandidate(choice)) copied += 1; else skipped += 1;
   }
 
-  // Backup existing tool paths before linking
-  for (const item of plan.backupPaths) {
-    if (!await pathExists(item.path)) continue;
-    if (await isSymlink(item.path)) continue;
-    const dest = path.join(backupDir, item.label);
-    await movePath(item.path, dest, item.kind);
-  }
-
   const linkPlan = await buildLinkPlan(opts);
-  await applyLinkPlan(linkPlan);
+  await applyLinkPlan(linkPlan, { force: !!opts.forceLinks, backup });
 
-  return { copied, skipped, backupDir };
+  return { copied, skipped, backupDir: backup.dir };
 }

@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { test, expect } from 'bun:test';
 import { scanMigration, applyMigration } from '../src/core/migrate.js';
+import { createBackupSession, finalizeBackup } from '../src/core/backup.js';
 import { makeTempDir, writeFile, createSkill } from './helpers.js';
 
 async function readLinkTarget(target: string): Promise<string> {
@@ -34,7 +35,9 @@ test('migration wizard copies selected items, backs up, and links', async () => 
     selections.set(conflict.targetPath, pick || null);
   }
 
-  const result = await applyMigration(plan, selections, { scope: 'global', homeDir: home });
+  const backup = await createBackupSession({ canonicalRoot: path.join(home, '.agents'), scope: 'global', operation: 'test' });
+  const result = await applyMigration(plan, selections, { scope: 'global', homeDir: home, backup, forceLinks: true });
+  await finalizeBackup(backup);
   expect(result.copied).toBeGreaterThan(0);
 
   const agentsRoot = path.join(home, '.agents');
@@ -43,6 +46,7 @@ test('migration wizard copies selected items, backs up, and links', async () => 
   expect(fs.existsSync(path.join(agentsRoot, 'hooks', 'hook.sh'))).toBe(true);
   expect(fs.existsSync(path.join(agentsRoot, 'skills', 'alpha-skill', 'SKILL.md'))).toBe(true);
   expect(fs.existsSync(path.join(agentsRoot, 'AGENTS.md'))).toBe(true);
+  expect(fs.existsSync(path.join(agentsRoot, 'CLAUDE.md'))).toBe(true);
 
   // Backup created
   expect(fs.existsSync(result.backupDir)).toBe(true);

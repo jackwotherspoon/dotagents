@@ -3,17 +3,16 @@ import fs from 'fs';
 import path from 'path';
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import SelectInput from 'ink-select-input';
-import TextInput from 'ink-text-input';
 import Spinner from 'ink-spinner';
 import { buildLinkPlan } from '../core/plan.js';
-import { applyLinkPlan } from '../core/apply.js';
 import { getLinkStatus } from '../core/status.js';
 import { applyMigration, scanMigration } from '../core/migrate.js';
 import { resolveRoots } from '../core/paths.js';
+import { createBackupSession, finalizeBackup } from '../core/backup.js';
+import { undoLastChange } from '../core/undo.js';
+import { preflightBackup } from '../core/preflight.js';
 import type { Scope, LinkPlan, LinkStatus } from '../core/types.js';
 import type { MigrationPlan, MigrationCandidate } from '../core/migrate.js';
-import { installSkillsFromSource } from '../installers/skills.js';
-import { loadMarketplace, installMarketplace } from '../installers/marketplace.js';
 import { HelpBar } from './ui/HelpBar.js';
 import { ScrollArea } from './ui/ScrollArea.js';
 import { Screen } from './ui/Screen.js';
@@ -25,15 +24,9 @@ type Step =
   | 'action'
   | 'status'
   | 'applying'
-  | 'force-confirm'
+  | 'confirm-change'
   | 'migrate-choice'
-  | 'skill-source-type'
-  | 'skill-input'
-  | 'plugin-marketplace-input'
-  | 'plugin-select'
   | 'done';
-
-type SkillSourceType = 'local' | 'url';
 
 export const App: React.FC = () => {
   const { exit } = useApp();
@@ -46,11 +39,8 @@ export const App: React.FC = () => {
   const [migratePlan, setMigratePlan] = useState<MigrationPlan | null>(null);
   const [migrateIndex, setMigrateIndex] = useState<number>(0);
   const [migrateSelections, setMigrateSelections] = useState<Map<string, MigrationCandidate | null>>(new Map());
-  const [skillType, setSkillType] = useState<SkillSourceType>('local');
-  const [skillInput, setSkillInput] = useState<string>('');
-  const [marketplaceInput, setMarketplaceInput] = useState<string>('');
-  const [marketplacePlugins, setMarketplacePlugins] = useState<string[]>([]);
-  const [forceBackupDir, setForceBackupDir] = useState<string | null>(null);
+  const [changePlan, setChangePlan] = useState<{ migrate: MigrationPlan; link: LinkPlan; backupDir: string; timestamp: string } | null>(null);
+  const [forceLinks, setForceLinks] = useState<boolean>(false);
   const [showDetails, setShowDetails] = useState<boolean>(false);
   const [conflictsOnly, setConflictsOnly] = useState<boolean>(false);
   const { stdout } = useStdout();
@@ -63,16 +53,14 @@ export const App: React.FC = () => {
     if (key.escape) {
       if (step === 'action') return setStep('scope');
       if (step === 'status') return setStep('action');
-      if (step === 'force-confirm') return setStep('action');
+      if (step === 'confirm-change') return setStep('action');
       if (step === 'migrate-choice') {
         setMigratePlan(null);
         setMigrateSelections(new Map());
+        setChangePlan(null);
+        setForceLinks(false);
         return setStep('action');
       }
-      if (step === 'skill-source-type') return setStep('action');
-      if (step === 'skill-input') return setStep('skill-source-type');
-      if (step === 'plugin-marketplace-input') return setStep('action');
-      if (step === 'plugin-select') return setStep('plugin-marketplace-input');
       if (step === 'done') return setStep('action');
     }
     if (step === 'done' && key.return) setStep('action');
@@ -95,31 +83,51 @@ export const App: React.FC = () => {
   const changes = plan?.changes.length || 0;
 
   const actionItems = useMemo(() => {
-    const items = [
-      { label: 'Apply/repair links', value: 'apply' },
-    ] as { label: string; value: string }[];
-    if (conflicts > 0) items.push({ label: 'Force apply (backup + overwrite conflicts)', value: 'force-apply' });
+    const items = [] as { label: string; value: string }[];
+    if (changes > 0) items.push({ label: `Switch ${changes} changes to .agents`, value: 'change' });
     items.push({ label: 'View status', value: 'view-status' });
-    items.push({ label: 'Migrate existing content', value: 'migrate' });
-    items.push({ label: 'Add skill', value: 'add-skill' });
-    items.push({ label: 'Install plugin', value: 'install-plugin' });
+    items.push({ label: 'Undo last change', value: 'undo' });
     items.push({ label: 'Exit', value: 'exit' });
     return items;
-  }, [conflicts]);
+  }, [changes]);
 
-  const displayName = (name: string) => {
-    if (name === 'agents-md') return 'AGENTS.md';
-    return name;
+  const mergeAgentStatus = (items: LinkStatus[]) => {
+    const claudeEntry = items.find((s) => s.name === 'claude-md') || null;
+    const agentsEntry = items.find((s) => s.name === 'agents-md') || null;
+    if (!claudeEntry && !agentsEntry) return items;
+
+    const merged: LinkStatus = {
+      name: 'agents-md',
+      source: claudeEntry?.source || agentsEntry?.source || '',
+      targets: [
+        ...(claudeEntry?.targets || []),
+        ...(agentsEntry?.targets || []),
+      ],
+    };
+
+    const withoutAgents = items.filter((s) => s.name !== 'claude-md' && s.name !== 'agents-md');
+    return [merged, ...withoutAgents];
   };
 
+  const displayName = (entry: LinkStatus) => {
+    if (entry.name === 'agents-md') {
+      const sourceFile = path.basename(entry.source);
+      if (sourceFile === 'CLAUDE.md') return 'AGENTS.md (Claude override)';
+      return 'AGENTS.md';
+    }
+    return entry.name;
+  };
+
+  const displayStatus = useMemo(() => mergeAgentStatus(status), [status]);
+
   const statusSummary = useMemo(() => {
-    return status.map((s) => {
+    return displayStatus.map((s) => {
       const linked = s.targets.filter((t) => t.status === 'linked').length;
       const missing = s.targets.filter((t) => t.status === 'missing').length;
       const conflict = s.targets.filter((t) => t.status === 'conflict').length;
-      return { name: displayName(s.name), linked, missing, conflict };
+      return { name: displayName(s), linked, missing, conflict };
     });
-  }, [status]);
+  }, [displayStatus]);
 
   const summaryTable = useMemo(() => {
     const rows = statusSummary.map((s) => ({
@@ -174,12 +182,12 @@ export const App: React.FC = () => {
   }, [plan]);
 
   const renderStatusList = () => {
-    const sections = status.map((s) => {
+    const sections = displayStatus.map((s) => {
       const targets = conflictsOnly ? s.targets.filter((t) => t.status === 'conflict') : s.targets;
       if (conflictsOnly && targets.length === 0) return null;
       return (
         <Box key={s.name} flexDirection="column" marginTop={1}>
-          <Text color="cyan">{displayName(s.name)}</Text>
+          <Text color="cyan">{displayName(s)}</Text>
           {targets.map((t) => (
             <Box key={t.path} flexDirection="column">
               <Text>
@@ -252,24 +260,14 @@ export const App: React.FC = () => {
                 setStep('status');
                 return;
               }
-              if (item.value === 'migrate') {
+              if (item.value === 'undo') {
                 if (!scope) return;
-                setBusy('Scanning existing content...');
+                setBusy('Undoing last change...');
                 setStep('applying');
                 void (async () => {
                   try {
-                    const plan = await scanMigration({ scope });
-                    setMigratePlan(plan);
-                    setMigrateIndex(0);
-                    setMigrateSelections(new Map());
-                    if (plan.conflicts.length > 0) {
-                      setBusy(null);
-                      setStep('migrate-choice');
-                      return;
-                    }
-                    setBusy('Migrating...');
-                    const result = await applyMigration(plan, new Map(), { scope });
-                    setMessage(`Migrated ${result.copied} items. Backup: ${result.backupDir}`);
+                    const result = await undoLastChange({ scope });
+                    setMessage(`Restored ${result.restored} items. Backup: ${result.backupDir}`);
                     await refreshStatus(scope);
                     setStep('done');
                   } catch (err: any) {
@@ -281,52 +279,27 @@ export const App: React.FC = () => {
                 })();
                 return;
               }
-              if (item.value === 'apply' || item.value === 'force-apply') {
-                if (item.value === 'force-apply') {
-                  setBusy('Preparing force apply...');
-                  setStep('applying');
-                  void (async () => {
-                    try {
-                      if (!scope) return;
-                      const roots = resolveRoots({ scope });
-                      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-                      setForceBackupDir(path.join(roots.canonicalRoot, 'backup', timestamp));
-                      setStep('force-confirm');
-                    } catch (err: any) {
-                      setMessage(err?.message || String(err));
-                      setStep('done');
-                    } finally {
-                      setBusy(null);
-                    }
-                  })();
-                  return;
-                }
-                setBusy('Applying...');
+              if (item.value === 'change') {
+                if (!scope) return;
+                setBusy('Scanning current setup...');
                 setStep('applying');
                 void (async () => {
                   try {
-                    if (!plan || !scope) return;
-                    const result = await applyLinkPlan(plan);
-                    setMessage(`Applied: ${result.applied}, Skipped: ${result.skipped}, Conflicts: ${result.conflicts}`);
-                    await refreshStatus(scope);
+                    const roots = resolveRoots({ scope });
+                    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                    const migrate = await scanMigration({ scope });
+                    const link = await buildLinkPlan({ scope });
+                    const backupDir = path.join(roots.canonicalRoot, 'backup', timestamp);
+                    setChangePlan({ migrate, link, backupDir, timestamp });
+                    setBusy(null);
+                    setStep('confirm-change');
                   } catch (err: any) {
                     setMessage(err?.message || String(err));
+                    setStep('done');
                   } finally {
                     setBusy(null);
-                    setStep('done');
                   }
                 })();
-                return;
-              }
-              if (item.value === 'add-skill') {
-                setSkillInput('');
-                setStep('skill-source-type');
-                return;
-              }
-              if (item.value === 'install-plugin') {
-                setMarketplaceInput('');
-                setStep('plugin-marketplace-input');
-                return;
               }
             }}
           />
@@ -357,44 +330,82 @@ export const App: React.FC = () => {
     );
   }
 
-  if (step === 'force-confirm') {
+  if (step === 'confirm-change' && changePlan) {
+    const migrateAuto = changePlan.migrate.auto.length;
+    const migrateConflicts = changePlan.migrate.conflicts.length;
+    const linkConflicts = changePlan.link.conflicts.length;
+    const linkChanges = changePlan.link.changes.length;
+    const proceedAllLabel = linkConflicts > 0
+      ? 'Apply changes + overwrite conflicts'
+      : 'Apply changes';
+    const proceedSkipLabel = linkConflicts > 0
+      ? 'Apply changes only (leave conflicts)'
+      : 'Apply changes';
     return (
       <Screen>
-        <Text color="yellow">Force apply will overwrite existing real files/directories.</Text>
+        <Text color="green">{appTitle}</Text>
         <Box flexDirection="column" marginTop={1}>
-          <Text>Backup will be created at:</Text>
-          <Text dimColor>{forceBackupDir || '(pending)'}</Text>
+          <Text>Switch all to .agents</Text>
+          <Text dimColor>Will copy existing content into .agents and relink tool paths.</Text>
+        </Box>
+        <Box flexDirection="column" marginTop={1}>
+          <Text>Plan summary:</Text>
+          <Text dimColor>Migration: {migrateAuto} auto · {migrateConflicts} conflicts (choose sources)</Text>
+          <Text dimColor>Links: {linkChanges} safe changes · {linkConflicts} conflicts (existing files/dirs)</Text>
+          <Text dimColor>Backup: {changePlan.backupDir}</Text>
+          <Text dimColor>Undo: Use "Undo last change" after this completes.</Text>
         </Box>
         <Box marginTop={1} flexDirection="column">
           <SelectInput
             items={[
-              { label: 'Proceed (create backup + overwrite)', value: 'proceed' },
-              { label: 'Cancel', value: 'cancel' },
+              { label: proceedAllLabel, value: 'force' },
+              ...(linkConflicts > 0 ? [{ label: proceedSkipLabel, value: 'skip' }] : []),
+              { label: 'Back', value: 'back' },
             ]}
             onSelect={(item) => {
-              if (item.value === 'cancel') {
-                setForceBackupDir(null);
-                setStep('action');
+              if (item.value === 'back') {
+                setChangePlan(null);
+                return setStep('action');
+              }
+              if (!scope) return;
+              const overwrite = item.value === 'force';
+              setForceLinks(overwrite);
+              if (changePlan.migrate.conflicts.length > 0) {
+                setMigratePlan(changePlan.migrate);
+                setMigrateIndex(0);
+                setMigrateSelections(new Map());
+                setStep('migrate-choice');
                 return;
               }
-              setBusy('Applying (force)...');
+              setBusy('Applying changes...');
               setStep('applying');
               void (async () => {
                 try {
-                  if (!plan || !scope) return;
-                  const backupDir = forceBackupDir || undefined;
-                  const result = await applyLinkPlan(plan, { force: true, backupDir });
-                  const backupNote = result.backedUp > 0 && result.backupDir
-                    ? `, Backed up: ${result.backedUp} (${result.backupDir})`
-                    : '';
-                  setMessage(`Applied: ${result.applied}, Skipped: ${result.skipped}, Conflicts: ${result.conflicts}${backupNote}`);
+                  const roots = resolveRoots({ scope });
+                  const backup = await createBackupSession({
+                    canonicalRoot: roots.canonicalRoot,
+                    scope,
+                    operation: 'change-to-agents',
+                    timestamp: changePlan.timestamp,
+                  });
+                  await preflightBackup({
+                    backup,
+                    linkPlan: changePlan.link,
+                    migratePlan: changePlan.migrate,
+                    selections: new Map(),
+                    forceLinks: overwrite,
+                  });
+                  const result = await applyMigration(changePlan.migrate, new Map(), { scope, backup, forceLinks: overwrite });
+                  await finalizeBackup(backup);
+                  setMessage(`Changed ${result.copied} items. Backup: ${result.backupDir}`);
                   await refreshStatus(scope);
+                  setStep('done');
                 } catch (err: any) {
                   setMessage(err?.message || String(err));
-                } finally {
-                  setForceBackupDir(null);
-                  setBusy(null);
                   setStep('done');
+                } finally {
+                  setBusy(null);
+                  setChangePlan(null);
                 }
               })();
             }}
@@ -443,8 +454,24 @@ export const App: React.FC = () => {
               setStep('applying');
               void (async () => {
                 try {
-                  const result = await applyMigration(migratePlan, next, { scope });
-                  setMessage(`Migrated ${result.copied} items. Backup: ${result.backupDir}`);
+                  const roots = resolveRoots({ scope });
+                  const timestamp = changePlan?.timestamp || new Date().toISOString().replace(/[:.]/g, '-');
+                  const backup = await createBackupSession({
+                    canonicalRoot: roots.canonicalRoot,
+                    scope,
+                    operation: 'change-to-agents',
+                    timestamp,
+                  });
+                  await preflightBackup({
+                    backup,
+                    linkPlan: changePlan?.link || (await buildLinkPlan({ scope })),
+                    migratePlan: migratePlan,
+                    selections: next,
+                    forceLinks,
+                  });
+                  const result = await applyMigration(migratePlan, next, { scope, backup, forceLinks });
+                  await finalizeBackup(backup);
+                  setMessage(`Changed ${result.copied} items. Backup: ${result.backupDir}`);
                   await refreshStatus(scope);
                 } catch (err: any) {
                   setMessage(err?.message || String(err));
@@ -453,6 +480,7 @@ export const App: React.FC = () => {
                   setMigratePlan(null);
                   setMigrateIndex(0);
                   setMigrateSelections(new Map());
+                  setChangePlan(null);
                   setStep('done');
                 }
               })();
@@ -468,146 +496,6 @@ export const App: React.FC = () => {
     return (
       <Screen>
         <Text color="yellow"><Spinner type="dots" /> {busy || 'Working...'}</Text>
-      </Screen>
-    );
-  }
-
-  if (step === 'skill-source-type') {
-    return (
-      <Screen>
-        <Text>Select skill source type:</Text>
-        <SelectInput
-          items={[
-            { label: 'Local path', value: 'local' },
-            { label: 'URL', value: 'url' },
-            { label: 'Back', value: 'back' },
-          ]}
-          onSelect={(item) => {
-            if (item.value === 'back') {
-              setStep('action');
-              return;
-            }
-            setSkillType(item.value as SkillSourceType);
-            setStep('skill-input');
-          }}
-        />
-        <Text dimColor>Press Esc to go back, or q to quit.</Text>
-      </Screen>
-    );
-  }
-
-  if (step === 'skill-input') {
-    return (
-      <Screen>
-        {skillType === 'local' ? (
-          <>
-          <Text>Paste a skills folder path and we’ll install all skills inside.</Text>
-          <Text>Or paste a SKILL.md file and we’ll install the full skill.</Text>
-        </>
-      ) : (
-        <>
-          <Text>Paste a skills folder URL and we’ll fetch all skills inside.</Text>
-          <Text>Or paste a SKILL.md URL and we’ll install the full skill.</Text>
-        </>
-      )}
-        <TextInput
-          value={skillInput}
-          onChange={setSkillInput}
-          onSubmit={() => {
-            if (!scope) return;
-            setBusy('Installing skill(s)...');
-            setStep('applying');
-            void (async () => {
-              try {
-                const result = await installSkillsFromSource({
-                  source: skillInput,
-                  sourceType: skillType,
-                  scope,
-                });
-                setMessage(`Installed: ${result.installed.join(', ') || 'none'} · Skipped: ${result.skipped.join(', ') || 'none'}`);
-                await refreshStatus(scope);
-              } catch (err: any) {
-                setMessage(err?.message || String(err));
-              } finally {
-                setBusy(null);
-                setStep('done');
-              }
-            })();
-          }}
-        />
-        <Text dimColor>Press Enter to continue, Esc to go back, or q to quit.</Text>
-      </Screen>
-    );
-  }
-
-  if (step === 'plugin-marketplace-input') {
-    return (
-      <Screen>
-        <Text>Enter marketplace path or URL:</Text>
-        <TextInput
-          value={marketplaceInput}
-          onChange={setMarketplaceInput}
-          onSubmit={() => {
-            if (!scope) return;
-            setBusy('Loading marketplace...');
-            setStep('applying');
-            void (async () => {
-              try {
-                const loaded = await loadMarketplace(marketplaceInput);
-                const plugins = loaded.json.plugins.map((p) => p.name);
-                setMarketplacePlugins(plugins);
-                setBusy(null);
-                setStep('plugin-select');
-              } catch (err: any) {
-                setMessage(err?.message || String(err));
-                setBusy(null);
-                setStep('done');
-              }
-            })();
-          }}
-        />
-        <Text dimColor>Press Enter to continue, Esc to go back, or q to quit.</Text>
-      </Screen>
-    );
-  }
-
-  if (step === 'plugin-select') {
-    return (
-      <Screen>
-        <Text>Select plugin to install:</Text>
-        <SelectInput
-          items={[
-            { label: 'All plugins', value: 'all' },
-            ...marketplacePlugins.map((p) => ({ label: p, value: p })),
-            { label: 'Back', value: 'back' },
-          ]}
-          onSelect={(item) => {
-            if (!scope) return;
-            if (item.value === 'back') {
-              setStep('action');
-              return;
-            }
-            setBusy('Installing plugin(s)...');
-            setStep('applying');
-            void (async () => {
-              try {
-                const result = await installMarketplace({
-                  marketplace: marketplaceInput,
-                  plugins: item.value === 'all' ? 'all' : [String(item.value)],
-                  scope,
-                });
-                setMessage(`Installed commands: ${result.installedCommands.length}, hooks: ${result.installedHooks.length}, skills: ${result.installedSkills.length}`);
-                await refreshStatus(scope);
-              } catch (err: any) {
-                setMessage(err?.message || String(err));
-              } finally {
-                setBusy(null);
-                setStep('done');
-              }
-            })();
-          }}
-        />
-        <Text dimColor>Press Esc to go back, or q to quit.</Text>
       </Screen>
     );
   }

@@ -10,7 +10,7 @@ export type Mapping = {
 
 export type LinkTask =
   | { type: 'ensure-source'; path: string; kind: SourceKind }
-  | { type: 'link'; source: string; target: string; kind: SourceKind }
+  | { type: 'link'; source: string; target: string; kind: SourceKind; replaceSymlink?: boolean }
   | { type: 'conflict'; source: string; target: string; reason: string; kind?: SourceKind }
   | { type: 'noop'; source: string; target: string };
 

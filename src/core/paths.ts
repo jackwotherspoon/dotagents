@@ -13,6 +13,7 @@ export type ResolvedRoots = {
   claudeRoot: string;
   factoryRoot: string;
   codexRoot: string;
+  cursorRoot: string;
   projectRoot: string;
   homeDir: string;
 };
@@ -26,6 +27,7 @@ export function resolveRoots(opts: RootOptions): ResolvedRoots {
       claudeRoot: path.join(homeDir, '.claude'),
       factoryRoot: path.join(homeDir, '.factory'),
       codexRoot: path.join(homeDir, '.codex'),
+      cursorRoot: path.join(homeDir, '.cursor'),
       projectRoot,
       homeDir,
     };
@@ -35,6 +37,7 @@ export function resolveRoots(opts: RootOptions): ResolvedRoots {
     claudeRoot: path.join(projectRoot, '.claude'),
     factoryRoot: path.join(projectRoot, '.factory'),
     codexRoot: path.join(projectRoot, '.codex'),
+    cursorRoot: path.join(projectRoot, '.cursor'),
     projectRoot,
     homeDir,
   };

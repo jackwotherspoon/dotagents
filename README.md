@@ -23,7 +23,7 @@ Or with Bun:
 bunx @iannuttall/dotagents
 ```
 
-Choose a workspace (Global home or Project folder) and follow the prompts. You can run it again anytime to add skills/plugins or repair links.
+Choose a workspace (Global home or Project folder) and follow the prompts. You can run it again anytime to repair links or undo changes.
 
 Global home affects all projects. Project folder only affects the current directory you run dotagents from.
 
@@ -31,8 +31,7 @@ Global home affects all projects. Project folder only affects the current direct
 
 - Keeps `.agents` as the source of truth.
 - Creates symlinks for Claude, Codex, and Factory.
-- Installs skills from a local path, git URL, or HTTPS URL.
-- Installs plugins from marketplaces.
+- Always creates a backup before any overwrite so changes are reversible.
 
 ## Where it links
 
@@ -47,6 +46,10 @@ Global home affects all projects. Project folder only affects the current direct
 `.agents/hooks` → `~/.claude/hooks`
 
 `.agents/hooks` → `~/.factory/hooks`
+
+`.agents/AGENTS.md` → `~/.factory/AGENTS.md`
+
+`.agents/AGENTS.md` → `~/.codex/AGENTS.md`
 
 `.agents/skills` → `~/.claude/skills`
 
@@ -78,8 +81,12 @@ bun run build
 
 ## Notes
 
+- Cursor supports `.claude/commands` and `.claude/skills` (global or project). If `.claude` does not exist but `.cursor` does, dotagents also links `.agents/commands` → `.cursor/commands` and `.agents/skills` → `.cursor/skills`.
 - Codex prompts always symlink to `.agents/commands` (canonical source).
 - Skills require a valid `SKILL.md` with `name` + `description` frontmatter.
+- Claude prompt precedence: if `.agents/CLAUDE.md` exists, it links to `.claude/CLAUDE.md`. Otherwise `.agents/AGENTS.md` is used. After adding or removing `.agents/CLAUDE.md`, re-run dotagents and apply/repair links to update the symlink. Factory/Codex always link to `.agents/AGENTS.md`.
+- Project scope creates `.agents`, `.claude`, `.factory`, and `.codex` inside the project (same link layout as global).
+- Backups are stored under `.agents/backup/<timestamp>` and can be restored from the TUI via “Undo last change.”
 
 ## License
 
