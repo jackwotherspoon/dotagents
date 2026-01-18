@@ -1,5 +1,5 @@
 import path from 'path';
-import type { Mapping, Scope } from './types.js';
+import type { Client, Mapping, Scope } from './types.js';
 import { resolveRoots } from './paths.js';
 import { pathExists } from '../utils/fs.js';
 
@@ -7,6 +7,7 @@ export type MappingOptions = {
   scope: Scope;
   projectRoot?: string;
   homeDir?: string;
+  clients?: Client[];
 };
 
 export async function getMappings(opts: MappingOptions): Promise<Mapping[]> {
@@ -15,56 +16,71 @@ export async function getMappings(opts: MappingOptions): Promise<Mapping[]> {
   const claudeOverride = path.join(canonical, 'CLAUDE.md');
   const agentsFallback = path.join(canonical, 'AGENTS.md');
   const agentsSource = await pathExists(claudeOverride) ? claudeOverride : agentsFallback;
-  const hasClaude = await pathExists(roots.claudeRoot);
-  const hasCursor = await pathExists(roots.cursorRoot);
-  const includeCursor = !hasClaude && hasCursor;
+  const clients = new Set<Client>(opts.clients ?? ['claude', 'factory', 'codex', 'cursor', 'opencode']);
 
-  return [
-    {
+  const mappings: Mapping[] = [];
+  const includeAgentFiles = opts.scope === 'global';
+  if (includeAgentFiles && clients.has('claude')) {
+    mappings.push({
       name: 'claude-md',
       source: agentsSource,
       targets: [path.join(roots.claudeRoot, 'CLAUDE.md')],
       kind: 'file',
-    },
-    {
-      name: 'agents-md',
-      source: agentsFallback,
-      targets: [
-        path.join(roots.factoryRoot, 'AGENTS.md'),
-        path.join(roots.codexRoot, 'AGENTS.md'),
-      ],
-      kind: 'file',
-    },
+    });
+  }
+
+  if (includeAgentFiles) {
+    const agentTargets = [
+      clients.has('factory') ? path.join(roots.factoryRoot, 'AGENTS.md') : null,
+      clients.has('codex') ? path.join(roots.codexRoot, 'AGENTS.md') : null,
+      clients.has('opencode') ? path.join(roots.opencodeConfigRoot, 'AGENTS.md') : null,
+    ].filter(Boolean) as string[];
+
+    if (agentTargets.length > 0) {
+      mappings.push({
+        name: 'agents-md',
+        source: agentsFallback,
+        targets: agentTargets,
+        kind: 'file',
+      });
+    }
+  }
+
+  mappings.push(
     {
       name: 'commands',
       source: path.join(canonical, 'commands'),
       targets: [
-        path.join(roots.claudeRoot, 'commands'),
-        path.join(roots.factoryRoot, 'commands'),
-        path.join(roots.codexRoot, 'prompts'),
-        ...(includeCursor ? [path.join(roots.cursorRoot, 'commands')] : []),
-      ],
+        clients.has('claude') ? path.join(roots.claudeRoot, 'commands') : null,
+        clients.has('factory') ? path.join(roots.factoryRoot, 'commands') : null,
+        clients.has('codex') ? path.join(roots.codexRoot, 'prompts') : null,
+        clients.has('opencode') ? path.join(roots.opencodeRoot, 'commands') : null,
+        clients.has('cursor') ? path.join(roots.cursorRoot, 'commands') : null,
+      ].filter(Boolean) as string[],
       kind: 'dir',
     },
     {
       name: 'hooks',
       source: path.join(canonical, 'hooks'),
       targets: [
-        path.join(roots.claudeRoot, 'hooks'),
-        path.join(roots.factoryRoot, 'hooks'),
-      ],
+        clients.has('claude') ? path.join(roots.claudeRoot, 'hooks') : null,
+        clients.has('factory') ? path.join(roots.factoryRoot, 'hooks') : null,
+      ].filter(Boolean) as string[],
       kind: 'dir',
     },
     {
       name: 'skills',
       source: path.join(canonical, 'skills'),
       targets: [
-        path.join(roots.claudeRoot, 'skills'),
-        path.join(roots.factoryRoot, 'skills'),
-        path.join(roots.codexRoot, 'skills'),
-        ...(includeCursor ? [path.join(roots.cursorRoot, 'skills')] : []),
-      ],
+        clients.has('claude') ? path.join(roots.claudeRoot, 'skills') : null,
+        clients.has('factory') ? path.join(roots.factoryRoot, 'skills') : null,
+        clients.has('codex') ? path.join(roots.codexRoot, 'skills') : null,
+        clients.has('opencode') ? path.join(roots.opencodeRoot, 'skills') : null,
+        clients.has('cursor') ? path.join(roots.cursorRoot, 'skills') : null,
+      ].filter(Boolean) as string[],
       kind: 'dir',
     },
-  ];
+  );
+
+  return mappings;
 }

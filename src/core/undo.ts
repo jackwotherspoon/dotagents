@@ -8,6 +8,9 @@ import { ensureDir, pathExists, removePath } from '../utils/fs.js';
 
 type RestoreResult = {
   restored: number;
+  restoredBackups: number;
+  removedCreated: number;
+  removedSymlinks: number;
   backupDir: string;
   undoneDir: string;
 };
@@ -86,11 +89,16 @@ export async function undoLastChange(opts: RootOptions): Promise<RestoreResult> 
   await backupExistingOriginals(entries, undoSession);
 
   let restored = 0;
+  let restoredBackups = 0;
+  let removedCreated = 0;
+  let removedSymlinks = 0;
   for (const entry of entries) {
     if (entry.action === 'create') {
       if (await pathExists(entry.originalPath)) {
         await restorePath(entry);
         restored += 1;
+        removedCreated += 1;
+        if (entry.kind === 'symlink') removedSymlinks += 1;
       }
       continue;
     }
@@ -98,9 +106,10 @@ export async function undoLastChange(opts: RootOptions): Promise<RestoreResult> 
     if (!await pathExists(entry.backupPath)) continue;
     await restorePath(entry);
     restored += 1;
+    restoredBackups += 1;
   }
 
   await finalizeBackup(undoSession);
 
-  return { restored, backupDir: undoSession.dir, undoneDir: latest.dir };
+  return { restored, restoredBackups, removedCreated, removedSymlinks, backupDir: undoSession.dir, undoneDir: latest.dir };
 }

@@ -14,6 +14,8 @@ export type ResolvedRoots = {
   factoryRoot: string;
   codexRoot: string;
   cursorRoot: string;
+  opencodeRoot: string;
+  opencodeConfigRoot: string;
   projectRoot: string;
   homeDir: string;
 };
@@ -28,6 +30,8 @@ export function resolveRoots(opts: RootOptions): ResolvedRoots {
       factoryRoot: path.join(homeDir, '.factory'),
       codexRoot: path.join(homeDir, '.codex'),
       cursorRoot: path.join(homeDir, '.cursor'),
+      opencodeRoot: path.join(homeDir, '.opencode'),
+      opencodeConfigRoot: path.join(homeDir, '.config', 'opencode'),
       projectRoot,
       homeDir,
     };
@@ -38,6 +42,8 @@ export function resolveRoots(opts: RootOptions): ResolvedRoots {
     factoryRoot: path.join(projectRoot, '.factory'),
     codexRoot: path.join(projectRoot, '.codex'),
     cursorRoot: path.join(projectRoot, '.cursor'),
+    opencodeRoot: path.join(projectRoot, '.opencode'),
+    opencodeConfigRoot: path.join(homeDir, '.config', 'opencode'),
     projectRoot,
     homeDir,
   };

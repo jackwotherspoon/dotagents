@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { resolveRoots } from './paths.js';
 import type { RootOptions } from './paths.js';
+import type { Client } from './types.js';
 import { findSkillDirs, parseSkillFile } from './skills.js';
 import { buildLinkPlan } from './plan.js';
 import { applyLinkPlan } from './apply.js';
@@ -55,10 +56,12 @@ function conflictLabel(targetPath: string, canonicalRoot: string): string {
   return path.basename(targetPath);
 }
 
-export async function scanMigration(opts: RootOptions): Promise<MigrationPlan> {
+export async function scanMigration(opts: RootOptions & { clients?: Client[] }): Promise<MigrationPlan> {
   const roots = resolveRoots(opts);
   const canonicalRoot = roots.canonicalRoot;
   const candidatesByTarget = new Map<string, MigrationCandidate[]>();
+  const clients = new Set<Client>(opts.clients ?? ['claude', 'factory', 'codex', 'cursor', 'opencode']);
+  const includeAgentFiles = opts.scope === 'global';
 
   const canonicalCommands = path.join(canonicalRoot, 'commands');
   const canonicalHooks = path.join(canonicalRoot, 'hooks');
@@ -68,29 +71,36 @@ export async function scanMigration(opts: RootOptions): Promise<MigrationPlan> {
 
   const sources = {
     commands: [
-      { label: 'Claude commands', dir: path.join(roots.claudeRoot, 'commands') },
-      { label: 'Factory commands', dir: path.join(roots.factoryRoot, 'commands') },
-      { label: 'Codex prompts', dir: path.join(roots.codexRoot, 'prompts') },
-      { label: 'Cursor commands', dir: path.join(roots.cursorRoot, 'commands') },
-    ],
+      clients.has('claude') ? { label: 'Claude commands', dir: path.join(roots.claudeRoot, 'commands') } : null,
+      clients.has('factory') ? { label: 'Factory commands', dir: path.join(roots.factoryRoot, 'commands') } : null,
+      clients.has('codex') ? { label: 'Codex prompts', dir: path.join(roots.codexRoot, 'prompts') } : null,
+      clients.has('cursor') ? { label: 'Cursor commands', dir: path.join(roots.cursorRoot, 'commands') } : null,
+      clients.has('opencode') ? { label: 'OpenCode commands', dir: path.join(roots.opencodeRoot, 'commands') } : null,
+    ].filter(Boolean) as { label: string; dir: string }[],
     hooks: [
-      { label: 'Claude hooks', dir: path.join(roots.claudeRoot, 'hooks') },
-      { label: 'Factory hooks', dir: path.join(roots.factoryRoot, 'hooks') },
-    ],
+      clients.has('claude') ? { label: 'Claude hooks', dir: path.join(roots.claudeRoot, 'hooks') } : null,
+      clients.has('factory') ? { label: 'Factory hooks', dir: path.join(roots.factoryRoot, 'hooks') } : null,
+    ].filter(Boolean) as { label: string; dir: string }[],
     skills: [
-      { label: 'Claude skills', dir: path.join(roots.claudeRoot, 'skills') },
-      { label: 'Factory skills', dir: path.join(roots.factoryRoot, 'skills') },
-      { label: 'Codex skills', dir: path.join(roots.codexRoot, 'skills') },
-      { label: 'Cursor skills', dir: path.join(roots.cursorRoot, 'skills') },
-    ],
-    agents: [
-      { label: 'Claude AGENTS.md', file: path.join(roots.claudeRoot, 'AGENTS.md') },
-      { label: 'Factory AGENTS.md', file: path.join(roots.factoryRoot, 'AGENTS.md') },
-      { label: 'Codex AGENTS.md', file: path.join(roots.codexRoot, 'AGENTS.md') },
-    ],
-    claude: [
-      { label: 'Claude CLAUDE.md', file: path.join(roots.claudeRoot, 'CLAUDE.md') },
-    ],
+      clients.has('claude') ? { label: 'Claude skills', dir: path.join(roots.claudeRoot, 'skills') } : null,
+      clients.has('factory') ? { label: 'Factory skills', dir: path.join(roots.factoryRoot, 'skills') } : null,
+      clients.has('codex') ? { label: 'Codex skills', dir: path.join(roots.codexRoot, 'skills') } : null,
+      clients.has('cursor') ? { label: 'Cursor skills', dir: path.join(roots.cursorRoot, 'skills') } : null,
+      clients.has('opencode') ? { label: 'OpenCode skills', dir: path.join(roots.opencodeRoot, 'skills') } : null,
+    ].filter(Boolean) as { label: string; dir: string }[],
+    agents: includeAgentFiles
+      ? [
+          clients.has('claude') ? { label: 'Claude AGENTS.md', file: path.join(roots.claudeRoot, 'AGENTS.md') } : null,
+          clients.has('factory') ? { label: 'Factory AGENTS.md', file: path.join(roots.factoryRoot, 'AGENTS.md') } : null,
+          clients.has('codex') ? { label: 'Codex AGENTS.md', file: path.join(roots.codexRoot, 'AGENTS.md') } : null,
+          clients.has('opencode') ? { label: 'OpenCode AGENTS.md', file: path.join(roots.opencodeConfigRoot, 'AGENTS.md') } : null,
+        ].filter(Boolean) as { label: string; file: string }[]
+      : [],
+    claude: includeAgentFiles
+      ? [
+          clients.has('claude') ? { label: 'Claude CLAUDE.md', file: path.join(roots.claudeRoot, 'CLAUDE.md') } : null,
+        ].filter(Boolean) as { label: string; file: string }[]
+      : [],
   } as const;
 
   const addCandidate = (candidate: MigrationCandidate) => {
@@ -176,11 +186,18 @@ export async function scanMigration(opts: RootOptions): Promise<MigrationPlan> {
   return { auto, conflicts, canonicalRoot };
 }
 
+export type MigrationResult = {
+  copied: number;
+  skipped: number;
+  backupDir: string;
+  links: { applied: number; skipped: number; conflicts: number; backedUp: number };
+};
+
 export async function applyMigration(
   plan: MigrationPlan,
   selections: Map<string, MigrationCandidate | null>,
-  opts: RootOptions & { backup?: BackupSession; forceLinks?: boolean },
-): Promise<{ copied: number; skipped: number; backupDir: string }> {
+  opts: RootOptions & { clients?: Client[]; backup?: BackupSession; forceLinks?: boolean },
+): Promise<MigrationResult> {
   const backup = opts.backup;
   if (!backup) throw new Error('Backup session required.');
   let copied = 0;
@@ -213,7 +230,17 @@ export async function applyMigration(
   }
 
   const linkPlan = await buildLinkPlan(opts);
-  await applyLinkPlan(linkPlan, { force: !!opts.forceLinks, backup });
+  const linkResult = await applyLinkPlan(linkPlan, { force: !!opts.forceLinks, backup });
 
-  return { copied, skipped, backupDir: backup.dir };
+  return {
+    copied,
+    skipped,
+    backupDir: backup.dir,
+    links: {
+      applied: linkResult.applied,
+      skipped: linkResult.skipped,
+      conflicts: linkResult.conflicts,
+      backedUp: linkResult.backedUp,
+    },
+  };
 }

@@ -29,16 +29,26 @@ test('creates symlinks from canonical .agents to tool homes', async () => {
   const claudeCommands = path.join(home, '.claude', 'commands');
   const factoryCommands = path.join(home, '.factory', 'commands');
   const codexPrompts = path.join(home, '.codex', 'prompts');
+  const cursorCommands = path.join(home, '.cursor', 'commands');
+  const opencodeCommands = path.join(home, '.opencode', 'commands');
   const claudeAgents = path.join(home, '.claude', 'CLAUDE.md');
   const factoryAgents = path.join(home, '.factory', 'AGENTS.md');
   const codexAgents = path.join(home, '.codex', 'AGENTS.md');
+  const opencodeAgents = path.join(home, '.config', 'opencode', 'AGENTS.md');
+  const cursorSkills = path.join(home, '.cursor', 'skills');
+  const opencodeSkills = path.join(home, '.opencode', 'skills');
 
   expect(await readLinkTarget(claudeCommands)).toBe(commands);
   expect(await readLinkTarget(factoryCommands)).toBe(commands);
   expect(await readLinkTarget(codexPrompts)).toBe(commands);
+  expect(await readLinkTarget(cursorCommands)).toBe(commands);
+  expect(await readLinkTarget(opencodeCommands)).toBe(commands);
   expect(await readLinkTarget(claudeAgents)).toBe(agentsFile);
   expect(await readLinkTarget(factoryAgents)).toBe(agentsFile);
   expect(await readLinkTarget(codexAgents)).toBe(agentsFile);
+  expect(await readLinkTarget(opencodeAgents)).toBe(agentsFile);
+  expect(await readLinkTarget(cursorSkills)).toBe(path.join(canonical, 'skills'));
+  expect(await readLinkTarget(opencodeSkills)).toBe(path.join(canonical, 'skills'));
 });
 
 test('adds cursor links when .cursor exists without .claude', async () => {
@@ -123,4 +133,29 @@ test('force apply replaces conflicting targets', async () => {
 
   const target = await readLinkTarget(codexPrompts);
   expect(target).toBe(path.join(home, '.agents', 'commands'));
+});
+
+test('project scope does not link AGENTS/CLAUDE files', async () => {
+  const home = await makeTempDir('dotagents-home-');
+  const project = await makeTempDir('dotagents-project-');
+
+  const plan = await buildLinkPlan({ scope: 'project', homeDir: home, projectRoot: project });
+
+  const blockedTargets = new Set([
+    path.join(project, '.claude', 'CLAUDE.md'),
+    path.join(project, '.factory', 'AGENTS.md'),
+    path.join(project, '.codex', 'AGENTS.md'),
+    path.join(home, '.config', 'opencode', 'AGENTS.md'),
+    path.join(project, '.agents', 'AGENTS.md'),
+    path.join(project, '.agents', 'CLAUDE.md'),
+  ]);
+
+  for (const task of plan.tasks) {
+    if (task.type === 'ensure-source') {
+      expect(blockedTargets.has(task.path)).toBe(false);
+      continue;
+    }
+    expect(blockedTargets.has(task.source)).toBe(false);
+    expect(blockedTargets.has(task.target)).toBe(false);
+  }
 });

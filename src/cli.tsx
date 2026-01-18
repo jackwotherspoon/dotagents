@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import path from 'path';
 import chalk from 'chalk';
-import { intro, outro, select, confirm, note, spinner, isCancel, cancel } from '@clack/prompts';
+import { intro, outro, select, confirm, note, spinner, isCancel, cancel, multiselect } from '@clack/prompts';
 import { buildLinkPlan } from './core/plan.js';
 import { getLinkStatus } from './core/status.js';
 import { applyMigration, scanMigration } from './core/migrate.js';
@@ -9,14 +9,14 @@ import { resolveRoots } from './core/paths.js';
 import { createBackupSession, finalizeBackup } from './core/backup.js';
 import { undoLastChange } from './core/undo.js';
 import { preflightBackup } from './core/preflight.js';
-import type { LinkStatus, Scope } from './core/types.js';
+import type { Client, LinkStatus, Scope } from './core/types.js';
 import type { MigrationCandidate } from './core/migrate.js';
 
 const appTitle = 'dotagents';
 
 type StatusSummary = { name: string; linked: number; missing: number; conflict: number };
 
-type Action = 'change' | 'status' | 'undo' | 'exit';
+type Action = 'change' | 'status' | 'undo' | 'clients' | 'exit';
 
 type ChangeChoice = 'force' | 'skip' | 'back';
 
@@ -117,10 +117,47 @@ function scopeLabel(scope: Scope): string {
   return scope === 'global' ? 'Global (~/.agents)' : 'Project (.agents)';
 }
 
-async function showStatus(scope: Scope, status: LinkStatus[], planConflicts: { target: string; reason: string }[]): Promise<void> {
+function pluralize(count: number, singular: string, plural?: string): string {
+  return count === 1 ? singular : (plural || `${singular}s`);
+}
+
+function formatCount(count: number, singular: string, plural?: string): string {
+  return `${count} ${pluralize(count, singular, plural)}`;
+}
+
+async function selectClients(): Promise<Client[]> {
+  const options = [
+    { label: 'Claude', value: 'claude' },
+    { label: 'Factory', value: 'factory' },
+    { label: 'Codex', value: 'codex' },
+    { label: 'Cursor', value: 'cursor' },
+    { label: 'OpenCode', value: 'opencode' },
+  ] as const;
+  const selected = await multiselect({
+    message: 'Select clients to manage',
+    options: options.map((opt) => ({ label: opt.label, value: opt.value })),
+    initialValues: options.map((opt) => opt.value),
+    required: true,
+  });
+  if (isCancel(selected)) exitCancelled();
+  return selected as Client[];
+}
+
+function formatClients(clients: Client[]): string {
+  const names: Record<Client, string> = {
+    claude: 'Claude',
+    factory: 'Factory',
+    codex: 'Codex',
+    cursor: 'Cursor',
+    opencode: 'OpenCode',
+  };
+  return clients.map((c) => names[c]).join(', ');
+}
+
+async function showStatus(scope: Scope, clients: Client[], status: LinkStatus[], planConflicts: { target: string; reason: string }[]): Promise<void> {
   const conflicts = new Map(planConflicts.map((c) => [c.target, c.reason]));
   const lines = renderStatusLines(mergeAgentStatus(status), conflicts);
-  note(lines.join('\n'), `Status · ${scopeLabel(scope)}`);
+  note(lines.join('\n'), `Status · ${scopeLabel(scope)} · ${formatClients(clients)}`);
 }
 
 async function resolveMigrationConflicts(plan: Awaited<ReturnType<typeof scanMigration>>): Promise<Map<string, MigrationCandidate | null> | null> {
@@ -137,13 +174,13 @@ async function resolveMigrationConflicts(plan: Awaited<ReturnType<typeof scanMig
   return selections;
 }
 
-async function runChange(scope: Scope): Promise<void> {
+async function runChange(scope: Scope, clients: Client[]): Promise<void> {
   const spin = spinner();
   spin.start('Scanning current setup...');
   const roots = resolveRoots({ scope });
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const migrate = await scanMigration({ scope });
-  const link = await buildLinkPlan({ scope });
+  const migrate = await scanMigration({ scope, clients });
+  const link = await buildLinkPlan({ scope, clients });
   const backupDir = path.join(roots.canonicalRoot, 'backup', timestamp);
   spin.stop('Scan complete');
 
@@ -162,7 +199,7 @@ async function runChange(scope: Scope): Promise<void> {
       message: 'Apply changes',
       options: [
         { label: 'Apply changes + overwrite conflicts', value: 'force' },
-        { label: 'Apply changes only (leave conflicts)', value: 'skip' },
+        { label: 'Apply changes (leave conflicts)', value: 'skip' },
         { label: 'Back', value: 'back' },
       ],
     });
@@ -197,9 +234,18 @@ async function runChange(scope: Scope): Promise<void> {
       selections,
       forceLinks: overwriteConflicts,
     });
-    const result = await applyMigration(migrate, selections, { scope, backup, forceLinks: overwriteConflicts });
+    const result = await applyMigration(migrate, selections, { scope, clients, backup, forceLinks: overwriteConflicts });
     await finalizeBackup(backup);
-    applySpinner.stop(`Changed ${result.copied} items. Backup: ${result.backupDir}`);
+    const migrationSummary = `Migrated ${formatCount(result.copied, 'item')}`;
+    const linkSummary = `Linked ${formatCount(result.links.applied, 'path')}`;
+    const conflictSummary = result.links.conflicts > 0
+      ? overwriteConflicts
+        ? `overwrote ${formatCount(result.links.conflicts, 'conflict')}`
+        : `left ${formatCount(result.links.conflicts, 'conflict')} untouched`
+      : '';
+    const pieces = [migrationSummary, linkSummary];
+    if (conflictSummary) pieces.push(conflictSummary);
+    applySpinner.stop(`${pieces.join(' · ')}. Backup: ${result.backupDir}`);
   } catch (err: any) {
     applySpinner.stop('Change failed');
     note(String(err?.message || err), 'Error');
@@ -209,10 +255,11 @@ async function runChange(scope: Scope): Promise<void> {
 async function run(): Promise<void> {
   intro(chalk.cyan(appTitle));
   const scope = await selectScope();
+  let clients = await selectClients();
 
   while (true) {
-    const status = mergeAgentStatus(await getLinkStatus({ scope }));
-    const plan = await buildLinkPlan({ scope });
+    const status = mergeAgentStatus(await getLinkStatus({ scope, clients }));
+    const plan = await buildLinkPlan({ scope, clients });
     const conflicts = plan.conflicts.length || 0;
     const changes = plan.changes.length || 0;
     const summary = buildStatusSummary(status);
@@ -220,13 +267,15 @@ async function run(): Promise<void> {
 
     note([
       `Scope: ${scopeLabel(scope)}`,
+      `Clients: ${formatClients(clients)}`,
       `Pending changes: ${changes} · Conflicts: ${conflicts}`,
       ...summaryLines,
     ].join('\n'), 'Overview');
 
     const options: { label: string; value: Action }[] = [];
-    if (changes > 0) options.push({ label: `Switch ${changes} changes to .agents`, value: 'change' });
+    if (changes > 0) options.push({ label: `Apply ${changes} changes to .agents`, value: 'change' });
     options.push({ label: 'View status', value: 'status' });
+    options.push({ label: 'Change clients', value: 'clients' });
     options.push({ label: 'Undo last change', value: 'undo' });
     options.push({ label: 'Exit', value: 'exit' });
 
@@ -235,7 +284,12 @@ async function run(): Promise<void> {
     if (action === 'exit') break;
 
     if (action === 'status') {
-      await showStatus(scope, status, plan.conflicts);
+      await showStatus(scope, clients, status, plan.conflicts);
+      continue;
+    }
+
+    if (action === 'clients') {
+      clients = await selectClients();
       continue;
     }
 
@@ -244,7 +298,21 @@ async function run(): Promise<void> {
       spin.start('Undoing last change...');
       try {
         const result = await undoLastChange({ scope });
-        spin.stop(`Restored ${result.restored} items. Backup: ${result.backupDir}`);
+        const restoredSummary = `Restored ${formatCount(result.restoredBackups, 'backup')}`;
+        const removedSummary = `Removed ${formatCount(result.removedCreated, 'created path')}`;
+        const symlinkSummary = result.removedSymlinks > 0
+          ? `${formatCount(result.removedSymlinks, 'symlink')} removed`
+          : '';
+        let totalSummary = '';
+        if (result.restoredBackups === 0 && result.removedCreated === 0) {
+          totalSummary = 'Nothing to undo.';
+        } else if (result.restoredBackups === 0) {
+          totalSummary = [removedSummary, symlinkSummary, 'No backups to restore.'].filter(Boolean).join(' · ');
+        } else {
+          totalSummary = [restoredSummary, removedSummary, symlinkSummary].filter(Boolean).join(' · ');
+        }
+        spin.stop(`${totalSummary} Reverted: ${result.undoneDir}`);
+        note(`Undo backup: ${result.backupDir}`, 'Undo log');
       } catch (err: any) {
         spin.stop('Undo failed');
         note(String(err?.message || err), 'Error');
@@ -253,7 +321,7 @@ async function run(): Promise<void> {
     }
 
     if (action === 'change') {
-      await runChange(scope);
+      await runChange(scope, clients);
     }
   }
 

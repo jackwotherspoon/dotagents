@@ -23,25 +23,29 @@ Or with Bun:
 bunx @iannuttall/dotagents
 ```
 
-Choose a workspace (Global home or Project folder) and follow the prompts. You can run it again anytime to repair links or undo changes.
+Choose a workspace (Global home or Project folder), select the clients you want to manage, and follow the prompts. You can run it again anytime to repair links or undo changes.
 
 Global home affects all projects. Project folder only affects the current directory you run dotagents from.
 
 ## What it does
 
 - Keeps `.agents` as the source of truth.
-- Creates symlinks for Claude, Codex, and Factory.
+- Creates symlinks for Claude, Codex, Factory, Cursor, and OpenCode (based on your selection).
 - Always creates a backup before any overwrite so changes are reversible.
 
-## Where it links
+## Where it links (global scope)
 
-`.agents/AGENTS.md` → `~/.claude/CLAUDE.md`
+`.agents/CLAUDE.md` → `~/.claude/CLAUDE.md` (if present)
+
+`.agents/AGENTS.md` → `~/.claude/CLAUDE.md` (fallback when no CLAUDE.md)
 
 `.agents/commands` → `~/.claude/commands`
 
 `.agents/commands` → `~/.factory/commands`
 
 `.agents/commands` → `~/.codex/prompts`
+
+`.agents/commands` → `~/.cursor/commands`
 
 `.agents/hooks` → `~/.claude/hooks`
 
@@ -51,11 +55,21 @@ Global home affects all projects. Project folder only affects the current direct
 
 `.agents/AGENTS.md` → `~/.codex/AGENTS.md`
 
+`.agents/AGENTS.md` → `~/.config/opencode/AGENTS.md`
+
+`.agents/commands` → `~/.opencode/commands`
+
 `.agents/skills` → `~/.claude/skills`
 
 `.agents/skills` → `~/.factory/skills`
 
 `.agents/skills` → `~/.codex/skills`
+
+`.agents/skills` → `~/.cursor/skills`
+
+`.agents/skills` → `~/.opencode/skills`
+
+Project scope links only commands/hooks/skills into the project’s client folders (no AGENTS/CLAUDE rules).
 
 ## Development
 
@@ -81,11 +95,12 @@ bun run build
 
 ## Notes
 
-- Cursor supports `.claude/commands` and `.claude/skills` (global or project). If `.claude` does not exist but `.cursor` does, dotagents also links `.agents/commands` → `.cursor/commands` and `.agents/skills` → `.cursor/skills`.
+- Cursor supports `.claude/commands` and `.claude/skills` (global or project). dotagents also links `.agents/commands` → `.cursor/commands` and `.agents/skills` → `.cursor/skills`.
+- OpenCode uses `~/.config/opencode/AGENTS.md` and prefers AGENTS.md over CLAUDE.md when both exist.
 - Codex prompts always symlink to `.agents/commands` (canonical source).
 - Skills require a valid `SKILL.md` with `name` + `description` frontmatter.
 - Claude prompt precedence: if `.agents/CLAUDE.md` exists, it links to `.claude/CLAUDE.md`. Otherwise `.agents/AGENTS.md` is used. After adding or removing `.agents/CLAUDE.md`, re-run dotagents and apply/repair links to update the symlink. Factory/Codex always link to `.agents/AGENTS.md`.
-- Project scope creates `.agents`, `.claude`, `.factory`, and `.codex` inside the project (same link layout as global).
+- Project scope creates `.agents` plus client folders for commands/hooks/skills only. Rule files (`AGENTS.md`/`CLAUDE.md`) are left to the repo root so you can manage them explicitly.
 - Backups are stored under `.agents/backup/<timestamp>` and can be restored via “Undo last change.”
 
 ## License
